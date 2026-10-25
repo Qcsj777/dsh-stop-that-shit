@@ -1,0 +1,4 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64" role="img" aria-label="Stop That Shit">
+  <path d="M19.6 5h24.8L59 19.6v24.8L44.4 59H19.6L5 44.4V19.6z" fill="none" stroke="currentColor" stroke-width="4.2" stroke-linejoin="round" opacity="0.4"/>
+  <rect x="16.5" y="27.5" width="31" height="9" rx="4.5" fill="currentColor"/>
+</svg>

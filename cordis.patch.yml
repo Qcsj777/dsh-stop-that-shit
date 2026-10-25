@@ -1,0 +1,15 @@
+# Stop That Shit — Host bundle patch.
+#
+# Mounts the STS bridge plugin into the Host context. The bridge owns the seven
+# DSH engine events (session/created|disposed, agent/pre-step,
+# tools/pre-execute|post-execute, subagent/start|end) plus the `/sts` slash
+# command. With no armed contract it is inert: every waterfall returns the
+# downstream decision untouched.
+#
+# dataDir: '' means "use the default", which the bridge resolves to
+# ~/.dsh/stop-that-shit. Point it elsewhere to keep several profiles apart.
+- insert:
+    - id: sts-bridge
+      name: 'dsh-stop-that-shit'
+      config:
+        dataDir: ''

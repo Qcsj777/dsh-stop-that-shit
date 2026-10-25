@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Stop That Shit",
+    "description": "One declared scope per Session. The $stop-that-shit directive arms the files, dependencies, and hashes the work may touch; tool calls outside it are denied or asked."
+  }
+}

@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Stop That Shit",
+    "description": "给会话加一道守门规则：用 $stop-that-shit 指令声明允许的文件、依赖与哈希范围，越界的工具调用会被拒绝或询问。"
+  }
+}

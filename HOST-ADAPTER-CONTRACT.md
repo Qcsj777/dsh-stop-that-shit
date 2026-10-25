@@ -1,0 +1,892 @@
+# Host Adapter Contract
+
+Stop That Shit has seven implemented host adapters in this candidate: Codex,
+Claude Code, DeepSeek Harness, OpenCode, Hermes Agent CLI, Pi, and Oh My Pi.
+Each adapter translates host input into the same `ControlEvent v2` and reuses
+the same contract parser, controller, decisions, state, and runtime evidence.
+
+An Adapter may reuse the decision module only if its host exposes:
+
+1. a stable session identifier;
+2. user prompts or explicit mode changes;
+3. a before-action event that can actually deny an action;
+4. tool name, input, and enough information to classify mutability.
+
+Lifecycle facts are separate from request parameters. `action.before` reserves
+capacity before the host response. `action.after.lifecycle` is one of `running`,
+`joined`, `not_started`, or `unknown`. Only a confirmed whole-call `joined` or
+`not_started` releases the remaining call reservation. A confirmed individual
+stop releases only a bound child; call-scoped chains hold their capacity until
+joined. A session-end notification alone does not prove that children stopped.
+
+`inspectDelegation` returns a reserved upper bound and unresolved reasons.
+`applyDelegationFact` owns reservation, identity, terminal and uncertainty
+transitions. Contract and lifecycle writes share `updateSession` and its lock.
+Adapters never correlate by arrival order. OpenCode preserves source-session
+identity when calls from several children use a shared root contract.
+
+Use a fresh action ID for each delegation execution within its source session.
+Guard returns `DUPLICATE_ACTION_ID` for a previously accepted ID, whether its
+reservation is pending, running, or completed. Duplicate lifecycle facts are
+safe to deliver. A later `not_started` for a repeated execution attempt cannot
+release the original pending call. If watch/off permits executions with the
+same ID, call-local completion cannot resolve their combined history; only
+confirmed completion of all delegations or a new session restores a finite limit.
+
+Each adapter independently declares `lifecycleVersion: 2` as a fixed value.
+The core requires both this declaration and `protocolVersion: 2` before it
+accepts lifecycle facts. Importing the runtime's protocol number alone cannot
+identify an adapter: old adapters can inherit the new number while retaining
+old stop-attempt behavior. Missing or unsupported lifecycle declarations use
+the compatibility decision path, rather than throwing an operational error.
+
+Under a finite limit, Guard returns `LIFECYCLE_PROTOCOL_REQUIRED` for delegation,
+control, and unknown actions from an undeclared adapter. Ordinary prompts,
+reads, and writes remain compatible. Legacy activity permitted while observing
+or off leaves unresolved history. Undeclared completion, binding, child-stop
+and session-end events do not change the ledger, including `completed: true`.
+Upgrade adapters and core together; history already lost during a mixed install
+cannot be reconstructed, so use a new session for a finite guarantee.
+
+The normalized event is versioned as `ControlEvent v2`:
+
+```json
+{
+  "protocolVersion": 2,
+  "lifecycleVersion": 2,
+  "kind": "action.before",
+  "sessionId": "opaque",
+  "action": {
+    "name": "Edit",
+    "mutability": "write",
+    "affectedPaths": ["src/config.cjs"],
+    "dependencyIntent": false,
+    "hashIntent": false
+  }
+}
+```
+
+## Ownership and native capability reuse
+
+The host owns execution and its system permissions. STS owns the additional
+constraints of the user's task. An STS pass means that it adds no restriction;
+the action still has to satisfy host permissions. The Codex adapter returns no
+permission override for a pass.
+
+| Responsibility | Owner | STS boundary |
+| --- | --- | --- |
+| Process execution, filesystem and network isolation | Host | Use native enforcement. STS path checks express task scope; they do not implement a sandbox. |
+| Permission prompts, plugin trust and installation | Host | Use supported host flows. Do not change global settings to make a task pass. |
+| Hook matching, process launch and timeouts | Host | Configure the needed events and supported budgets. Keep only necessary STS work in each handler. |
+| Task mode, file scope, hash/dependency authority and task delegation budget | STS | Parse explicit directives, preserve corrections and explain decisions. A host permission grant does not create task authority. |
+| Tool identity and event translation | Adapter | Preserve raw names and map verified host operations to shared facts. Do not infer identity from arbitrary prefixes. |
+| Shell structure | Callable host interface or an appropriate parser | Verify access and coverage before reuse. STS applies task semantics to supported facts; unknown command structure must not become read-only through a partial match. |
+| Agent creation, restart, interruption and native concurrency control | Host | Track additional task reservations from correlated host facts. STS does not schedule or terminate agents itself. |
+| Task decisions and explanations | STS | Extend the existing status, runtime and explain surfaces. Keep audit data limited to metadata and distinguish responses from observed effects. |
+
+Before replacing STS behavior with a native capability, establish:
+
+1. The interface is callable from the installed integration, not only used
+   inside the host or exposed to a separate client.
+2. Its semantics cover the required actions and state transitions.
+3. It operates at the intended task scope without changing other sessions.
+4. The installed version demonstrates the expected result and failure behavior.
+
+If native behavior covers the requirement, keep only the adapter and the
+remaining task-specific logic. If it covers part, document that part. Missing
+host facts remain unknown; local identifiers and timers cannot replace them.
+
+### Codex reuse limits
+
+Codex documents native filesystem/network permissions, hook matchers and a
+spawned-thread concurrency setting. See [permissions](https://learn.chatgpt.com/docs/permissions),
+[hooks](https://learn.chatgpt.com/docs/hooks) and the
+[configuration reference](https://learn.chatgpt.com/docs/config-file/config-reference).
+The current configuration reference names the limit
+`agents.max_concurrent_threads_per_session`, with `agents.max_threads` as a
+legacy alias. It counts concurrently open spawned threads, excluding the primary
+thread. STS `agents=N` counts reserved task capacity, including uncertain work.
+These are different contracts. Native limits, zero, restarts and task-local
+updates need equivalent-behavior evidence before replacing STS accounting.
+
+A normal Hook does not select the active thread's permissions or agent limit.
+App-server client settings are a separate integration surface; their existence
+does not give an installed plugin control of its current thread. STS must not
+edit shared Codex configuration to emulate a per-task directive.
+
+Codex's documented `PreToolUse` does not support `permissionDecision: "ask"`.
+The current adapter maps a decision that needs renewed task authority to a
+supported denial and explanation. It does not claim to open a native approval
+dialog. A later corrected directive can supply the missing task authority.
+
+## Codex mapping
+
+The shared parser accepts one directive at the start of the first non-empty
+line, outside quotes and code blocks. Formal directive parsing does not scan
+later text for fields.
+Fields stay on that line before `--` or `: `. Unknown fields and conflicting
+values leave the previous contract unchanged and report an error. Runtime
+queries and labels use the same entry boundary.
+
+Natural-language corrections skip fenced and indented code, inline code,
+explicit Markdown quote lines, and quoted strings. This is a bounded text
+filter, not a full Markdown parser. It preserves actual corrections in prose:
+documenting `review only` leaves an edit task unchanged, while a direct request
+to review without editing still selects review.
+
+The Codex adapter binds UUID-based `spawn_agent` results `{agent_id, nickname}`
+to the originating call. JSON objects and serialized JSON results are accepted.
+`wait_agent` releases only requested UUID targets reported as completed or shut
+down. The adapter also recognizes the exact names `multi_agent_v1wait_agent`,
+`multi_agent_v1send_input`, `multi_agent_v1resume_agent`, and
+`multi_agent_v1close_agent` emitted by namespaced v1 tools. Codex still reports
+their spawn tool as `spawn_agent`. See the pinned [hook dispatch code](https://github.com/openai/codex/blob/b0af519c39766c173191fc39b341808619b51c74/codex-rs/core/src/tools/registry.rs)
+and [tool-name flattening](https://github.com/openai/codex/blob/b0af519c39766c173191fc39b341808619b51c74/codex-rs/core/src/tools/mod.rs).
+
+Codex desktop `0.154.0-alpha.6.2` uses a `collaboration` namespace. Its hook
+names concatenate that prefix and the tool name, for example
+`collaborationspawn_agent`, `collaborationfollowup_task`, and
+`collaborationlist_agents`. The adapter maps the six known collaboration tools
+to their short names before classification and lifecycle handling. It does not
+strip arbitrary prefixes from third-party tools.
+
+MultiAgentV2 returns `{task_name, nickname?}` from `spawn_agent` and
+`{message, timed_out}` from `wait_agent`. The wait reports mailbox activity, not
+completion. The adapter retains these spawn reservations because it cannot bind
+them to a UUID. A path-only `list_agents` snapshot does not release them. Finite
+`agents=N` capacity can therefore remain occupied after v2 work completes.
+This is a compatibility limit; do not use path order or mailbox text to infer
+completion. See the pinned [v2 tool implementation](https://github.com/openai/codex/tree/b0af519c39766c173191fc39b341808619b51c74/codex-rs/core/src/tools/handlers/multi_agents_v2).
+
+Path aliases, errored statuses, and `close_agent.previous_status` do not prove
+terminal execution. `SubagentStart` and `SubagentStop` are not registered;
+payloads from older configurations remain ignored. `SubagentStop` is a stop
+attempt that other hooks can continue.
+Finite Guard rejects `send_input`, `resume_agent`, and v2 `followup_task` because
+the host does not identify each restarted run in its completion results.
+V2 `send_message` queues a message without starting a turn and does not enter
+this restart gate. Watch mode reports restart uncertainty without denying the
+call; that uncertainty persists if a later directive sets a finite Guard limit.
+
+`interrupt_agent` and `close_agent` are control operations and remain available
+in review mode. Their previous-status responses do not release reservations.
+The native `PostToolUse` matcher selects only spawn and wait results, including
+the supported namespaced names and the `Agent` alias. Ordinary tool results do
+not launch that hook. The adapter also ignores ordinary results from older
+configurations. Waits without supported completion facts do not enter the state
+writer. Spawn results still record missing completion evidence, and proven UUID
+wait results still update reservations under the lock.
+
+Audit records use the same requested delegation count as admission decisions.
+A rejected single-agent request records one requested unit and zero newly
+reserved units; it does not report that an agent ran.
+
+### Session end
+
+Ordinary session end reads existing state without taking
+a writer lock or releasing reservations. Session exit alone does not prove that
+delegated work completed. An explicit `allDelegationsStopped` fact still follows
+the existing locked update path.
+
+## Claude Code mapping
+
+`src/adapters/claude-hooks.cjs` maps:
+
+```text
+SessionStart         -> session.start
+UserPromptSubmit     -> prompt.submit (also the /stop-that-shit:stop-that-shit slash form)
+PreToolUse            -> action.before
+SubagentStart         -> subagent.start
+SubagentStop          -> ignored (a stop attempt can be continued by other hooks)
+PostToolUse           -> action.after (by tool_use_id)
+PermissionDenied      -> action.after / not_started (auto mode only)
+PostToolUseFailure    -> action.after / unknown
+SessionEnd            -> session.end
+UserPromptExpansion  -> prompt.submit (Stop That Shit Skill only; optional on hosts that expose it)
+```
+
+Direct slash normalization preserves code indentation and newline boundaries.
+It does not turn a quoted or indented slash example into a contract command.
+
+The Claude adapter returns a `PreToolUse` `permissionDecision: "deny"` when the
+shared controller denies an action. `agents=N` is enforced before a Claude
+`Agent` tool runs. Its `PostToolUse` payload joins the real `tool_use_id` to the
+returned `tool_response.agentId`; `status: "completed"` releases the activity,
+while `status: "async_launched"` keeps it reserved. `SubagentStart` uses the
+host-provided `agent_id`; the adapter does not require or invent a
+`reservation_id`. A later `SubagentStop` alone cannot reclaim background
+capacity: another hook can block that stop and continue the agent. This adapter
+has no verified automatic terminal signal for that background path. Use a new
+session for a finite limit when no supported joined result is available.
+
+Under a finite `agents=N` limit, Guard denies `SendMessage` with
+`DELEGATION_LIFECYCLE_UNPROVEN`. This tool can wake a stopped agent, but its
+stop events do not identify the run. A delayed stop from a previous run cannot
+safely release a new run's slot. Use a new `Agent` call instead. Without a
+finite limit, messaging is unchanged; watch reports this boundary without denial.
+
+The classifier covers Claude-native `Write`, `Edit`, `NotebookEdit`,
+`EnterWorktree`, `Bash`, `PowerShell`, `Monitor`, `Agent`, current read tools,
+and control/task tools. `Monitor` command sources reuse shell dependency/hash
+classification; WebSocket monitors are read-only. `Workflow` is treated as
+unbounded delegation and is denied by an armed Guard because its internal
+subagent fan-out cannot be proven to satisfy the configured agent limits.
+MCP/plugin tool names
+fall back to the existing conservative name classifier. Explicit file locks
+normalize POSIX and Windows absolute paths relative to Hook `cwd` when possible.
+
+## OpenCode mapping
+
+The package default export combines `id`, the V1 `server`, and a V2 `effect`.
+Both package entrypoints resolve to this object; host loaders choose their
+native adapter. V2 targets 2.0.18 and uses the matching schema and Effect
+runtime dependencies. V1 loads the V2 implementation lazily. The named V1
+`StopThatShitPlugin` export remains available.
+The root `server.mjs` also exposes the combined default for V2 local-directory
+discovery, which probes physical entry files rather than package exports.
+
+### V1
+
+The V1 plugin uses the documented plugin surface only: the `event` hook
+(`message.part.updated` plus `session.created`/`session.updated`/
+`session.deleted`), `tool.execute.before`, and `tool.execute.after`. It does not
+use the undocumented `chat.message` hook.
+
+User text is recovered from a `message.part.updated` trigger through the
+documented SDK call `client.session.message`, mapped to `prompt.submit`, and
+`tool.execute.before` is mapped to `action.before`. A denied action throws
+before the tool runs and records `execution_denial_returned`; Codex continues to
+record `permission_deny_returned`. Watch-only context is appended to a
+successful tool result through `tool.execute.after`.
+
+Contract context is injected with the documented SDK call
+`client.session.prompt({ noReply: true })` carrying a synthetic text part.
+Synthetic and ignored parts never arm or change the contract, so injected
+messages cannot feed back into contract parsing. Per-session processing is
+serialized, and `tool.execute.before` waits for in-flight message processing
+before it evaluates the contract.
+
+The existing host-mode path treats editable-agent messages as authorization.
+When a root-session user message containing no `$stop-that-shit` mention arrives
+under an edit-capable agent (resolved through `client.app.agents()`; unknown agents fail
+open) while the contract is `review`, the plugin advances the contract to
+`change` with `source: host`, preserving file, dependency, and hash settings.
+Quoted and embedded mentions suppress that promotion without becoming direct
+authorization. Explicit natural-language task corrections also take precedence
+over editable-agent promotion, including a renewed read-only instruction.
+Multipart text is joined with newlines; later parts cannot add
+directive fields to the first line. Explicit directives always win. Read-only
+agents and subagent messages never advance the root contract. The host permission layer
+continues to apply independently.
+
+An invalid directive adds error context and preserves the previous contract.
+The event callback cannot reject a user turn, so `tool.execute.before` throws
+the directive error until a corrected instruction clears it. This also applies
+after reload, to child-session calls, and when context injection fails. Pending
+errors prevent implicit editable-agent promotion. This input pause is separate
+from shared Guard policy and applies even if the previous level was watch/off;
+a valid watch/off directive clears it. Input pauses do not create shared
+policy-denial audit events.
+
+OpenCode creates a new session identifier for each `task` subagent. The plugin
+maps child sessions to the root session contract. A task
+`tool.execute.before` reserves its child count and `tool.execute.after` emits
+`action.after` with the tool's explicit action ID. The adapter reads
+`output.metadata.sessionId` to bind the child and `output.metadata.background`
+to retain background activity, including foreground calls promoted to background.
+A joined task result releases the slot. A terminal
+child session update or documented `session.idle`/idle `session.status` event
+emits `subagent.stop` when the child was explicitly associated. Deleting the
+root session emits `session.end`, while deleting a child never clears the root
+reservation. The plugin does not parse child
+prompts as new user authority. Under a finite limit, Guard denies `task_id`
+continuations because a reused child session ID does not identify its run.
+Use a new task call instead. Without a finite limit, continuations are unchanged.
+If ancestry cannot be resolved, it fails open
+without treating the uncertain child prompt as user authority.
+
+### V2
+
+V2 registers native `session.context`, `tool.execute.before/after`, and a scoped
+event subscription through the Effect API. A deliberate denial is a failed
+`Tool.Error`, not a rejected Promise converted into a defect. Unexpected adapter
+failures remain host errors; they do not silently authorize the action.
+
+Before model context or tool execution, the adapter resolves session ancestry
+and synchronizes delivered root user messages from `session.context`. It never
+arms a contract from the pre-admission prompt hook. Synthetic messages and child
+prompts cannot change the root contract. Plugin storage checkpoints processed
+message IDs across reloads; the shared contract, invalid-input state and ledger
+remain in their existing storage. Editable-agent promotion is limited to the
+newest plain root user message and requires a resolved edit-capable agent,
+including session permission overrides. Message IDs are tracked as identities,
+never interpreted as delivery order; compaction does not reset that record.
+Synchronization is serialized per root so unrelated sessions can proceed.
+Session metadata is refreshed after acquiring the permit. Pending runtime
+query replies survive other hooks and plugin reloads until the root context
+consumes them; child context cannot consume those replies.
+
+The adapter normalizes `shell` to shell analysis, `patch.patchText` to patch
+analysis, and `write/edit.path` to the shared file classifier. File paths use
+the calling session's directory, rather than the plugin's loading directory.
+Call identity includes the assistant message, tool-call ID and tool name; the
+controller also namespaces child calls by their source session.
+
+Native `subagent` calls reserve one unit. A completed tool result with a child
+session ID and `status: completed` joins the call; `status: running` binds the
+child while retaining its unit. Failed or unrecognized results do not prove
+completion. Child execution success/failure and user interruption provide
+terminal facts; shutdown, superseding work, ordinary idle and deletion do not.
+Finite limits reject `sessionID` continuations, whose events lack run identity.
+Missed or unprovable completion retains capacity, including across reloads.
+
+Code Mode is not a whole-program enforcement boundary: direct network effects
+do not traverse tool hooks, and nested calls can share an outer call ID. The
+adapter keeps the core's unknown-action policy; it does not promise full Code
+Mode coverage or introduce a JavaScript interpreter.
+
+## Hermes Agent CLI
+
+The Hermes adapter is implemented in `src/adapters/hermes-hooks.cjs` and
+classifies tools in `src/adapters/hermes-tool-classifier.cjs`. The native Plugin
+maps this deliberately small event surface:
+
+```text
+Hermes pre_llm_call  -> prompt.submit
+Hermes pre_tool_call -> action.before
+Hermes post_tool_call -> action.after
+Hermes subagent_start/subagent_stop -> subagent.start/subagent.stop
+Hermes on_session_end -> session.end
+```
+
+`pre_llm_call` maps `session_id` to `sessionId`,
+`extra.user_message` to `prompt`, and `extra.turn_id` (or the available
+top-level turn id) to `turnId`. A context result is rendered as
+`{"context":"..."}`.
+
+`pre_tool_call` maps the top-level `tool_name`, `tool_input`, `session_id`, and
+`cwd` to `action.before`. A denied action is rendered as
+`{"action":"block","message":"..."}`. Unknown events, empty payloads, and
+non-applicable allow results produce no stdout and exit successfully.
+
+An invalid directive returns error context from `pre_llm_call`; it does not
+abort the model call. Until a corrected instruction clears the error,
+`pre_tool_call` returns a block response, including after a runtime restart.
+As with OpenCode, this is input rejection, independent of the previous
+watch/off level, and does not create shared policy-denial audit events.
+
+The adapter reserves the complete `delegate_task` batch. Its serialized JSON
+result identifies a background dispatch through `status: dispatched`,
+`mode: background`, and `subagent_ids`. Start events map these aliases to
+`child_session_id`; later results or starts can complete the association.
+Only completed/failed/error child-stop statuses release bound children. Timeout and
+interrupted statuses can occur while a worker is still alive and retain capacity.
+A synchronous result joins the batch only when all result entries are completed,
+failed or error. A failed result here means the child returned and was cleaned up,
+including provider rejection or invalid final output. Unknown result shapes and
+session-end notifications retain capacity.
+No fabricated `reservation_id` is required or accepted from Hermes lifecycle
+hooks. The generated runtime ships together with the adapter.
+
+## DeepSeek Harness
+
+The DeepSeek Harness adapter is implemented in `src/adapters/dsh-hooks.cjs` and
+classifies tools in `src/adapters/dsh-tool-classifier.cjs`. Harness is an
+event-emitter plugin host rather than a hook-file host, so there is no
+`hooks.json` to read: a listener calls `handleDshHook(point, payload)` with the
+harness extension point name and that point's own payload. The mapped surface is:
+
+```text
+Harness session/created    -> session.start
+Harness session/disposed   -> session.end
+Harness agent/pre-step     -> prompt.submit
+Harness tools/pre-execute  -> action.before
+Harness tools/post-execute -> action.after
+Harness subagent/start     -> subagent.start
+Harness subagent/end       -> subagent.stop
+```
+
+`tools/execute` and the other waterfall points are deliberately not mapped. The
+adapter ignores an unrecognized point instead of guessing a kind.
+
+### The required native-to-adapter bridge
+
+`handleDshHook` does NOT accept the native event payloads. The harness hands a
+listener the host object itself:
+
+| Point | Native payload |
+| --- | --- |
+| `session/created`, `session/disposed` | the `Session` |
+| `agent/pre-step` | `{ agent, messages, turn, step, signal }` |
+| `tools/pre-execute` | a `ToolExecution`; the session is on `exec.agent.session` |
+| `tools/post-execute` | `(exec, result)` |
+| `subagent/start`, `subagent/end` | the child lifecycle info |
+
+None of these carries a `session`, `prompt`, or `exec` field, so passing one
+directly produces no event at all. A consuming plugin must normalize first.
+
+`fromNativeEvent(hookPoint, native, context)` performs exactly that
+transformation and is the supported bridge. It returns the normalized payload,
+or null for an unmapped point, so every listener can pass through the same call.
+
+`context` carries what the native signature cannot deliver in one argument:
+
+```js
+// The session lookup lets the bridge walk up the parent chain to find the
+// root. The header names only the immediate parent, so for root → child →
+// grandchild the resolver must visit child → root before keying the call.
+function rootOf(sessionId, getSessionById) {
+  let current = sessionId;
+  const seen = new Set();
+  while (current && !seen.has(current)) {
+    seen.add(current);
+    const session = getSessionById(current);
+    // A session the store cannot resolve (or one without a readable header)
+    // cannot prove it has no parent. Accepting it as the root would fail
+    // open, so refuse the whole chain instead.
+    if (!session || !session.header) return null;
+    if (!session.header.parentSession) return current;
+    current = session.header.parentSession;
+  }
+  return null; // cycle, unresolvable hop, or unreachable root: fail closed
+}
+
+// Tools waterfall: (exec, next). `rootSessionId` is REQUIRED whenever the
+// calling session has a `parentSession`; without it the call is refused, because
+// the header names only the immediate parent and one hop is not the root.
+// Pass `resolveRootSession` so the adapter can resolve the full lineage
+// instead of trusting an immediate-parent id as the root.
+ctx.on('tools/pre-execute', async (exec, next) => {
+  const payload = fromNativeEvent('tools/pre-execute', exec, {
+    rootSessionId: rootOf(exec.agent.session.id, getSessionById),
+    resolveRootSession: (id) => rootOf(id, getSessionById)
+  })
+  if (!payload) return next()
+  return applyDshDecision('tools/pre-execute', handleDshHook('tools/pre-execute', payload, options), next)
+})
+
+// Tools waterfall: (exec, result, next) — the result is a separate argument.
+ctx.on('tools/post-execute', async (exec, result, next) => {
+  const payload = fromNativeEvent('tools/post-execute', exec, {
+    result,
+    rootSessionId: rootOf(exec.agent.session.id, getSessionById),
+    resolveRootSession: (id) => rootOf(id, getSessionById)
+  })
+  if (payload) handleDshHook('tools/post-execute', payload, options)
+  return next()
+})
+
+// Subagent lifecycle: the run info is flat { runId, provider, id, local } and
+// carries no parent session, so the caller supplies it.
+ctx.on('subagent/start', (info) => {
+  handleDshHook('subagent/start', fromNativeEvent('subagent/start', info, { sessionId: parentSessionId })!, options)
+})
+```
+
+Without `context.rootSessionId` and without a `resolveRootSession` callback, a delegated tool call is refused outright, with a reason naming the missing field. That is deliberate: the session header exposes only the immediate parent, and the intermediate child in a deeper delegation holds no contract, so guessing a parent would restore the bypass. A supplied `rootSessionId` is trusted as the authority; when it is absent, `resolveRootSession` walks the parent chain and returns null if the root cannot be reached.
+
+Without `context.result` the post-dispatch fact carries no result, and without
+`context.sessionId` a subagent fact is not translated at all: filing it under
+the child id would create an orphan contract key the parent ledger never sees.
+
+The run info's `runId` is the only start/end correlator the harness provides,
+and the child `id` repeats across runs of the same agent. It is carried on the
+normalized payload so a consumer never has to fall back to arrival order, which
+this contract forbids. `ControlEvent` has no field for it, so it does not reach
+the event today: the adapter emits no completion facts and capacity stays
+reserved.
+
+The normalized shape is `{ session: { id }, prompt, turnId }` for the pre-step
+point and `{ session: { id }, exec: { name, arguments, callId }, cwd }` for the
+tool gate. `messageText` flattens the admitted messages into the prompt string,
+because `agent/pre-step` delivers message content blocks rather than text.
+
+The session id for a tool call comes from `exec.agent.session`. The agent loop
+sets `agent` on every root call, and the PTC transport threads it down to each
+nested dispatch, so a model-initiated read or write always carries one.
+
+A delegated child runs in its own session, whose header names the one it was
+forked from. Keying a child's tool calls by the child's id would read an
+unconfirmed contract and admit work the parent never authorized, so the bridge
+resolves the root: `context.rootSessionId` when the caller supplies one, otherwise
+`exec.agent.session.header.parentSession`. Lifecycle facts keep using the source
+session, so correlation is unaffected. A child with no parent is a root session
+and is its own authority.
+
+A `prompt.submit` for a session with a `parentSession` is not translated at all.
+The child already inherits the contract governing its delegation, and a directive
+arriving there would arm a fresh contract that its own tool calls are then
+checked against.
+
+`ToolExecution` carries no `cwd`. The bridge reads the workspace from
+`exec.agent.session.header.cwd`, which is the same source the host's own hook
+payload helper uses. Without it an absolute path cannot be normalized against the
+declared file boundary, and a file the contract permits by relative path is
+rejected by the same file written as an absolute one.
+
+A call made by calling `ctx.tools.execute()` directly, with no `agent`, has no
+session identity: it is not translated, and therefore not gated. A deployment that
+grants programmatic tool execution should pass the calling agent so the guard
+applies to those calls too.
+
+`session/created` and `session/disposed` carry the session object, so its `id`
+becomes `sessionId`. A payload without a session identity is not translated,
+because an empty key would merge unrelated contracts.
+
+### The returned result is intermediate
+
+`handleDshHook` returns an adapter result, never a harness decision. None of
+`null`, `{ kind: 'deny', reason }`, `{ kind: 'reject', reason }`, or
+`{ kind: 'context', text }` is a `PreToolDecision` or a `PreStepDecision`.
+Returning one unchanged is a defect: a bare `{ kind: 'context' }` returned from
+`agent/pre-step` leaves `messages` undefined, which the agent loop reads.
+
+| Adapter result | `tools/pre-execute` | `agent/pre-step` |
+| --- | --- | --- |
+| `null` | `next()` | `next()` |
+| `{ kind: 'deny', reason }` | return it as the `PreToolDecision` | not produced here |
+| `{ kind: 'reject', reason }` | not produced here | return `{ kind: 'reject' }` and surface the reason separately |
+| `{ kind: 'context', text }` | `await next()`, then attach through the plugin's own channel | `await next()`, then fold into the returned `messages` |
+
+`applyDshDecision(hookPoint, result, next, onContext)` implements that
+translation and calls `next` exactly once unless it returns a blocking decision.
+A plugin that omits `onContext` gets the downstream decision unchanged, which is
+the safe default at the tool gate.
+
+`agent/pre-step` has no reason field: `PreStepDecision` is
+`{ kind: 'reject' } | { kind: 'enter', messages }`, and the loop ends the turn as
+`blocked` without reporting further. The message therefore reaches the plugin
+through `onContext` with `kind: 'reason'`, never through the decision. For the
+same reason `applyDshDecision` never returns a `deny` at the pre-step gate: it
+degrades to `{ kind: 'reject' }` and routes the reason to `onContext`.
+
+The harness counts turns numerically. `ControlEvent.turnId` is an identifier, so
+a numeric turn is coerced to a string during translation rather than being
+dropped for failing a string check.
+
+`tools/pre-execute` maps the pending `exec` to `action.before`: `exec.name`,
+`exec.arguments`, `exec.callId`, and the session workspace `cwd`. The harness
+call id becomes `action.id`. A delegated call without a call id is not
+translated, because the controller cannot correlate it.
+
+`tools/post-execute` maps the settled outcome to `action.after`. A `deny` or
+`cancel` decision reports `not_started`, since the tool body never ran. An
+explicit asynchronous launch reports `running`. Every other outcome reports
+`unknown`, including an accepted result: the harness reports no child completion
+for a delegated call, so an accepted call is not evidence that its subagents
+finished. This is stricter than the Claude adapter and keeps capacity reserved.
+
+The harness registers tools under lowercase snake_case names. `write` and `edit`
+are writes; `bash` and `pwsh` are classified from the parsed command rather than
+the tool name; `subagent`, `subagent_fork`, `spawn_teammate`, and `workflow` are
+delegations; `terminal_list` and `terminal_read` are reads while `terminal_send`,
+`terminal_signal`, and `terminal_close` mutate a live terminal. `lsp` is a read
+because every documented operation is a navigation query, `send_message` is a
+control operation because delivering a message writes nothing to the workspace,
+and `ralph` is a delegation because each round opens a fresh child. Unknown
+names fall back to the host-neutral heuristics, which also cover MCP names such
+as `mcp__server__create_item`.
+
+`plugin_manager` is classified by its `action`, not by its name. A `list_*`
+action only observes. `install_bundle` can execute build scripts and every set
+action persists across the profile, so those classify as writes.
+
+An unrecognized or missing action defaults to `write`, which is the stricter
+direction: outside a change contract a write is refused, while `unknown` would
+only request approval. Under a bare change contract with no `files=` boundary
+the core admits any write with no affected path, for every adapter alike, so
+this default does not change that behavior.
+
+Tool names are matched case-insensitively. A tool's registered name is
+configurable — `tool-subagent` selects its own at load time — so exact-case
+matching would let a renamed delegation tool fall out of the explicit sets and
+stop reserving capacity.
+
+The experimental `stagehand_*` browser tools are deliberately unmapped and stay
+`unknown`. Their actions are not verified against a shipped schema here, and an
+unknown mutability is refused or requires approval rather than passing, so the
+default fails closed.
+
+`subagent_fork` is the shipped alias of the `subagent` package, selected by a
+config-driven tool name. It must reserve delegation capacity identically, or a
+finite `agents=N` is bypassed by calling the same tool under its alias.
+
+The shared `Write`/`Edit` analyzers match those names exactly, so the adapter
+maps the harness lowercase names onto them instead of forking the rules. Hash
+intent and manifest dependency intent therefore behave the same for DSH file
+tools as they do for the Claude surface.
+
+### The file editor
+
+`str_replace_editor` selects one command per call, so it classifies by command
+rather than by tool name. `view` is a read and contributes no affected path;
+`create`, `str_replace`, and `insert` are writes. Its content fields are
+`file_text`, `new_str`, and `old_str`, which are translated into the shared
+manifest analysis so a dependency added through the editor is caught exactly as
+it would be through `write`.
+
+### The PTC transport
+
+`run_code` is a transport, not an analyzed action. It carries `description` and
+`code` rather than a shell `command`. The program is handed one global binding,
+`tools`, and each call through it is scheduled through the registry and
+traverses `tools/pre-execute` under its real name, so a nested read or write is
+classified and gated, and a nested denial surfaces inside the program as a
+binding rejection. That binding is the only tool surface, not the only way to
+cause an effect.
+
+A program that reaches the filesystem through its own runtime is not covered,
+and the classification must not imply otherwise. A sandbox policy is optional
+for a PTC runtime, so a deployment that runs programs without OS confinement has
+no STS gate on that path. Enforcing it belongs to the host under the ownership
+table above, which is why the default here is the side that fails closed.
+
+`send_message` sets `delegationLifecycleUnproven` because it can wake a
+teammate that already stopped, and `subagent/end` carries no run identity that
+separates that new run from a delayed report about the previous one. `workflow`
+is reported as unbounded delegation because the harness exposes no bounded
+fan-out argument.
+
+Context is offered at `session/created`, `agent/pre-step`, and
+`tools/pre-execute`. It is not offered at `tools/post-execute`,
+`subagent/end`, or `session/disposed`, where there is no way to fold text back
+into the settled result without replacing tool output.
+
+DeepSeek Harness publishes no concurrency setting comparable to Codex's
+`agents.max_concurrent_threads_per_session`. `agents=N` is therefore counted
+from STS reservations alone, and delegation under a finite limit is
+conservative: capacity is released only by a correlated completion fact, which
+this adapter does not currently produce.
+
+### Explicit Hermes tool coverage
+
+The first version uses an explicit, conservative table. An unlisted tool is not
+silently promoted to a safe class merely because its name or input contains a
+path.
+
+| Class | Explicit coverage | Behavior |
+| --- | --- | --- |
+| `write` | `write_file`, `patch` | Extracts real targets for file locks; missing targets remain unproven. |
+| `delegate` | `delegate_task` with one `goal` or a `tasks` batch | Reserves the number of child agents that will be started: one for `goal`, or `tasks.length` for a batch. The complete count is checked and reserved atomically before the tool runs. |
+| `read` | `read_file`, `search_files`, `web_search`, `web_extract`, `vision_analyze` | Known read-only allowlist. |
+| `control` | `clarify`, `todo`, and `delegate_task` with `action=list`, `action=steer`, or `action=stop` | Control operations; do not reserve agent-limit units and are not repository writes. |
+| shell-derived | `terminal` | Reuses the existing shell classifier: explicit reads are `read`, explicit writes are `write`, and unproven commands are `unknown`. |
+| `unknown` | `execute_code`, browser/computer-use, memory, cron, Skill management, message sending, and every unlisted built-in, plugin, or MCP tool | Fail open before an explicit contract; under `review`/`answer`/`monitor`, block as `MUTABILITY_UNPROVEN`. |
+
+`write_file` and `patch` provide affected paths from their actual input. V4A
+patches include every Create/Update/Delete/Move target. Paths are normalized
+relative to Hook `cwd` with POSIX and Windows absolute-path handling. The
+adapter reuses the existing dependency/hash detectors and does not duplicate
+core mode, hash, dependency, file-lock, or agent-budget decisions.
+
+A Hermes `delegate_task` call accepts a task array or its JSON string form.
+A non-empty batch reserves its length; an empty array falls back to the single
+`goal`, matching the host normalizer. The complete count is checked before
+execution, including when `agents=0`.
+
+## Pi
+
+The Pi package entrypoint is `pi/stop-that-shit.ts`. It is tested against
+`@earendil-works/pi-coding-agent` `0.84.4` and maps this extension surface:
+
+```text
+input               -> prompt.submit
+before_agent_start  -> contract context message
+tool_call            -> action.before -> { block: true, reason } on denial
+tool_result          -> action.after plus watch-only context appended to the tool result
+session_shutdown     -> session.end
+```
+
+The Adapter takes the stable session ID from Pi's session manager, preserves
+`toolCallId` as the action ID, and maps `cwd`, structured tool input, `mode`
+(`tui`, `rpc`, `json`, or `print`), and `hasUI` into the shared event. The same
+decision path is used in UI and headless modes; notifications are UI-only.
+
+`input` accepts both `$stop-that-shit` and Pi's native
+`/skill:stop-that-shit` form. Input whose source is `extension` never creates
+user authority. Pi can receive queued input while an Agent turn is streaming;
+contract changes in that state are handled without changing the active
+contract and must be submitted again after Pi is idle.
+
+Invalid directives return `action: handled` from `input`, so that input does
+not start a model turn. A visible custom message reports the error in UI and
+headless sessions without triggering a turn. If delivery fails, the adapter
+tries a UI notification and still returns handled. The previous contract is
+unchanged; a corrected directive can start the next turn normally.
+
+The explicit Pi table covers `read`, `grep`, `find`, `ls`, `write`, `edit`,
+`bash`, and `powershell`. Every unlisted custom or package tool remains
+`unknown`. The optional official `subagent` example is recognized only through
+its documented single, `tasks`, and `chain` input shapes. The parent tool call
+reserves the concurrent count atomically: one slot for a single task or a
+sequential `chain`, and `tasks.length` for a parallel batch. Pi retains the
+reservation by `toolCallId` until the official tool's `tool_result` confirms
+that its children have joined, including failed children. An explicit background or
+unknown-status result remains active because the current Pi extension API does
+not expose a child-specific stop event. `session_shutdown` alone does not
+confirm that such custom child work ended. Separate child Pi processes do not inherit the parent contract through
+a proven standard ancestry channel.
+Pi's user-initiated `!` and `!!` shell paths are outside the Agent `tool_call`
+surface.
+
+Pi operational adapter errors are caught so they retain the shared fail-open
+behavior. Only a shared policy denial returns Pi's `block`; `terminate` is
+omitted so the Agent can recover with an in-scope action.
+
+## Oh My Pi (unreleased candidate)
+
+The explicit entrypoint is `omp/stop-that-shit.ts`, checked against
+`@oh-my-pi/pi-coding-agent` `18.4.4`. It reuses the shared `ControlEvent v2`,
+controller, state, and decisions. The Pi package entrypoint remains separate.
+
+```text
+session_start          -> optional --sts-contract root directive
+input                  -> idle interactive root prompt.submit
+/sts native command    -> idle root prompt.submit without a model turn
+before_agent_start     -> contract or query context message
+tool_call              -> action.before -> { block: true, reason } on denial
+tool_result            -> action.after and watch context
+task:subagent:lifecycle -> call-qualified child identity and root linkage
+tool_approval_resolved -> not_started for a rejected, tracked task
+```
+
+OMP uses its session manager's ID and `toolCallId`. Invalid root directives
+return `handled: true` and a custom error message. Only idle root input from
+`interactive` or `rpc` can change authority when the host emits that event.
+OMP 18.4.4 emits `input` from its TUI controller, not its RPC/SDK prompt path.
+RPC uses the native `/sts` command; print/SDK startup uses `--sts-contract`.
+The adapter does not parse `before_agent_start.prompt` to infer authority.
+Extension input, child prompts,
+and launch flags on known children cannot grant a new root contract.
+
+The native `task` tool reserves one slot for a single task or `tasks.length`
+for a batch. A synchronous joined result or `completed`/`failed` lifecycle
+event releases confirmed capacity. Aborted or unknown work keeps its capacity.
+Child session files map to the root contract; call-qualified child IDs prevent
+late completions from releasing a later reservation. Native child-executor
+checks with a deterministic local provider observed inherited review denial,
+child prompts unable to grant authority, completed-slot reuse, and change writes.
+Malformed or unreadable saved links enter read-only recovery without replacing
+the file; the adapter passes recovery facts through the shared controller.
+Recovery checks and returned denials retain audit events and event IDs. The
+controller does not persist a replacement contract for the damaged link.
+
+Tool classification reuses Pi and shared shell/manifest analysis. It also
+handles OMP edit transports, rename destinations, `glob`, `web_search`,
+`ask`, `todo`, `yield`, and documented hub operations. Dependency checks use
+both source and destination manifest types for apply-patch moves, structured
+renames, and hashline `MV` edits. Structured entries share their final rename
+destination. Anchored (`sloppy`) edits retain the file target and compare Find
+text with Replace or Insert content for dependency checks; hash checks inspect
+the replacement or inserted body. These checks use supplied content; a rename
+with no content does not establish the destination's dependencies. Untracked `eval`,
+custom `subagent`, ambiguous hub revival, and native `write agent://…` messaging
+retain unproven lifecycle status. Agent mail can wake one or many parked agents;
+finite limits deny it. Process reads and `write proc://<id>/kill` are read/control
+operations. Other protocol writes remain unknown and expose no filesystem paths.
+The native loader, runner, and write tool were exercised without model calls.
+User shell escapes and arbitrary custom tool effects are outside this evidence.
+
+## Shared shell classification
+
+Codex Rules evaluate argument prefixes and the host execution path can parse
+supported shell chains. That does not make `codex execpolicy check` a complete
+shell parser for the plugin. Reuse requires a verified callable interface;
+otherwise use bounded analysis and retain unknown results. See [Rules](https://learn.chatgpt.com/docs/agent-configuration/rules).
+The shared classifier analyzes a bounded static grammar. It does not expose
+or duplicate the host's complete shell parser.
+
+The shared shell classifier examines each command in a static chain before
+classifying the whole call. Every command must be a supported read to return
+`read`; a known write returns `write`, and otherwise the result is `unknown`.
+It recognizes literal quoted arguments and simple `;`, newline, `&&`, `||` and
+pipe separators. Quoted command examples remain data. Expansions, script blocks,
+unproven shell wrappers, ambiguous escapes and incomplete syntax remain unknown.
+This intentionally limited grammar applies without guessing the user's shell.
+PowerShell's seven non-ASCII quote characters remain unknown where they can
+open or close a string. An unquoted backslash also remains unknown because
+Bash removes it before ordinary characters. Quoted Windows paths remain usable.
+
+Embedded double quotes and doubled double quotes can become new arguments
+under legacy PowerShell native argument passing. Such native program calls
+remain unknown. Known PowerShell read cmdlets receive their literal arguments
+directly, so their quoted searches remain available.
+Legacy PowerShell also drops empty native arguments. Calls with empty arguments
+must be reads both with the arguments preserved and with them removed. This
+keeps harmless empty searches available while checking for newly exposed options.
+
+Executable names must match supported commands; an argument containing
+`git status` does not make an unknown program read-only. Git `-C` and
+`--no-pager` preserve supported query classification. Branch mutations,
+`git restore` and Git output-file options cannot pass review as reads.
+Ripgrep `--pre` and `--hostname-bin` executable options remain unknown. Option
+values and operands after `--` remain data, including literal option names.
+Native sandbox and permission controls remain responsible for execution,
+including programs' configured
+behavior and unsupported invocation forms.
+Git branch classification keeps argument boundaries and accepts only supported
+query options. Unknown negations and abbreviations cannot borrow an earlier
+`--list`. Values passed to `--format` remain data; arguments after `--` are
+operands, including paths that happen to start with `--output=`.
+Supported Git queries consume required option values before recognizing `--`
+as an option terminator. For example, `--word-diff-regex --` consumes a regex;
+it cannot hide a later `--output`. Unknown query options remain unknown, and
+optional values must use their attached form.
+
+Shell hash and dependency checks reuse this command analysis. Arguments to
+proven reads are data, so searching for `npm install` or `Get-FileHash` does not
+request those operations. Each command in a chain is checked separately; an
+actual installation or hash operation keeps its existing authorization check.
+Unproven shell syntax retains the conservative text checks.
+
+Each adapter obtains mutability, hash/dependency intent, and affected paths from
+one analysis entry point. Ordinary shell inputs are parsed once per action;
+legacy individual classifier exports remain available. Host-specific input and
+path normalization are preserved.
+The optional `analysisReason` identifies a fixed classification cause, such as
+an executable option or ambiguous native arguments. It adds detail to existing
+denial messages and `explain` without changing authorization. Runtime records
+store the reason code, not command text or argument values.
+
+## Support matrix and evidence boundary
+
+| Hermes surface | Status | Evidence and boundary |
+| --- | --- | --- |
+| Hermes CLI + native Plugin | Supported and tested offline | Real Hermes envelopes, adapter/controller cases, lifecycle entrypoint tests, and parallel active-reservation tests. |
+| Hermes Gateway | Reload after lifecycle changes | Run `hermes gateway restart` after enabling, disabling, updating, rolling back, or reinstalling the plugin; it is not required on every use. |
+| cron, Kanban worker, ACP, Desktop, or paths bypassing the standard tool dispatcher | Not supported or declared | No adapter contract or matching test exists for these surfaces. |
+
+Host-specific event names, tool classification, paths, and response JSON belong
+inside the Adapter. Model identity is evaluation metadata, not a new Adapter.
+The Adapter may report that it returned context or a host-specific denial, but it
+must not claim that the host prevented execution through every other path.
+`RuntimeEvent v1` therefore records `hostEffect` as `unobserved`.
+
+All five adapters are guardrails, not sandboxes. Specialized tool paths can
+bypass normal Hooks, and a returned `permission_deny_returned` or Hermes block
+response is evidence of the adapter response—not proof that the host ultimately
+did not execute the action.
+
+### Accounting after uncertain activity
+
+Each permitted unbounded or unversioned resume call gets its own unresolved
+entry. Later finite Guard delegation returns `DELEGATION_STATE_UNPROVEN`.
+Confirmed whole-call joined/not-started evidence clears only that call's entry;
+an unversioned old stop does not. If the host cannot provide sufficient evidence,
+a new host session is needed for a finite guarantee. A bounded call with an
+unknown result simply retains its original reservation. Reads, status collection,
+and stop requests continue under their existing policies; a control operation
+that can start work still requires delegation admission.
+
+Schema 4 preserves budgets including zero, reservations and deduplication.
+Every existing pre-v4 session has unverified history, including an empty ledger:
+older versions could already have discarded running work. It remains usable for
+ordinary work, but a new session is needed for a finite delegation guarantee.
+Reads normalize in memory; the next locked mutation persists it. Runtime records report
+`reservedUpperBound` and `countUnproven`, not a measured live-process count.
+
+Host evidence: [Claude failure and permission events](https://code.claude.com/docs/en/hooks),
+[Codex multi-agent handlers](https://github.com/openai/codex/tree/main/codex-rs/core/src/tools/handlers/multi_agents),
+[Hermes child execution](https://github.com/NousResearch/hermes-agent/blob/main/tools/delegate_tool_child_run.py).
+These mappings have offline replay coverage; they do not establish installed-host
+end-to-end behavior or model improvement.

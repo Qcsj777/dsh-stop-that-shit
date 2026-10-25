@@ -1,0 +1,66 @@
+{
+  "name": "dsh-stop-that-shit",
+  "version": "0.1.0",
+  "description": "Stop That Shit（STS）for DeepSeek Harness: arms an explicit scope contract from a `$stop-that-shit …` / `/sts …` directive, then audits every tool call against it — an unarmed guard allows everything. A DSH bundle wrapping lennney/stop-that-shit (MIT).",
+  "type": "commonjs",
+  "main": "lib/bridge.cjs",
+  "license": "MIT",
+  "engines": {
+    "dsh": ">=0.2.1-rc.2"
+  },
+  "keywords": [
+    "deepseek-harness",
+    "dsh",
+    "dsh-plugin",
+    "security",
+    "guard",
+    "scope"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Qcsj777/dsh-stop-that-shit.git"
+  },
+  "homepage": "https://github.com/Qcsj777/dsh-stop-that-shit#readme",
+  "bugs": {
+    "url": "https://github.com/Qcsj777/dsh-stop-that-shit/issues"
+  },
+  "exports": {
+    ".": "./lib/bridge.cjs",
+    "./lib/bridge.cjs": "./lib/bridge.cjs",
+    "./lib/dsh-compat.cjs": "./lib/dsh-compat.cjs",
+    "./locale/*.json": "./locale/*.json",
+    "./icon": "./icon.svg",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "lib/bridge.cjs",
+    "lib/dsh-compat.cjs",
+    "src/*.cjs",
+    "src/adapters/*.cjs",
+    "test/dsh-adapter.test.cjs",
+    "test/dsh-compat.test.cjs",
+    "test/bridge-mount.test.cjs",
+    "skills/stop-that-shit/SKILL.md",
+    "skills/stop-that-shit/agents/openai.yaml",
+    "skills/stss/SKILL.md",
+    "skills/stss/agents/openai.yaml",
+    "skills/stss/references/examples.md",
+    "locale/zh.json",
+    "locale/en.json",
+    "icon.svg",
+    "cordis.patch.yml",
+    "LICENSE",
+    "HOST-ADAPTER-CONTRACT.md",
+    "README.md",
+    "VENDOR.md"
+  ],
+  "scripts": {
+    "test": "node --test test/dsh-adapter.test.cjs test/dsh-compat.test.cjs test/bridge-mount.test.cjs",
+    "check": "node --check lib/bridge.cjs && node --check lib/dsh-compat.cjs"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}
